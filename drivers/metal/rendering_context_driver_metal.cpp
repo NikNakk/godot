@@ -39,6 +39,7 @@
 #include <objc/message.h>
 #include <os/log.h>
 #include <os/signpost.h>
+#include <stdio.h>
 
 #pragma mark - Logging
 
@@ -249,6 +250,12 @@ class API_AVAILABLE(macos(11.0), ios(14.0), tvos(14.0)) SurfaceOffscreen : publi
 	std::atomic_int count;
 	uint64_t target_time = 0;
 	uint64_t present_interval_usec = 1'000'000;
+	bool drawable_timing_enabled = false;
+	uint64_t drawable_warn_usec = 1000;
+	uint64_t drawable_acquire_count = 0;
+	uint64_t drawable_stall_count = 0;
+	uint64_t drawable_total_wait_usec = 0;
+	uint64_t drawable_max_wait_usec = 0;
 	CA::MetalLayer *layer;
 
 public:
@@ -269,6 +276,18 @@ public:
 				present_interval_usec = interval_usec > 0 ? interval_usec : 1;
 			}
 		}
+		drawable_timing_enabled = OS::get_singleton()->get_environment("GODOT_MTL_OFF_SCREEN_DRAWABLE_TIMING") == "1";
+		if (String warn_usec_env = OS::get_singleton()->get_environment("GODOT_MTL_OFF_SCREEN_DRAWABLE_WARN_US"); !warn_usec_env.is_empty()) {
+			int64_t warn_usec = warn_usec_env.to_int();
+			if (warn_usec > 0) {
+				drawable_warn_usec = uint64_t(warn_usec);
+			}
+		}
+		if (drawable_timing_enabled) {
+			fprintf(stderr,
+					"Godot Metal off-screen drawable timing enabled: present_interval=%llu us, warning_threshold=%llu us\n",
+					(unsigned long long)present_interval_usec, (unsigned long long)drawable_warn_usec);
+		}
 		target_time = OS::get_singleton()->get_ticks_usec();
 
 		textures.resize(frame_buffer_size);
@@ -281,6 +300,14 @@ public:
 	}
 
 	~SurfaceOffscreen() override {
+		if (drawable_timing_enabled && drawable_acquire_count > 0) {
+			double mean_wait_usec = double(drawable_total_wait_usec) / double(drawable_acquire_count);
+			fprintf(stderr,
+					"Godot Metal off-screen drawable timing summary: acquisitions=%llu, stalls>=%lluus=%llu, mean=%.1fus, max=%lluus, present_interval=%lluus\n",
+					(unsigned long long)drawable_acquire_count, (unsigned long long)drawable_warn_usec,
+					(unsigned long long)drawable_stall_count, mean_wait_usec,
+					(unsigned long long)drawable_max_wait_usec, (unsigned long long)present_interval_usec);
+		}
 		memdelete_arr(frame_buffers);
 		for (MTL::Texture *texture : textures) {
 			if (texture) {
@@ -354,7 +381,22 @@ public:
 		uint64_t now = OS::get_singleton()->get_ticks_usec();
 		if (now >= target_time) {
 			target_time = now + present_interval_usec;
+			uint64_t drawable_begin_usec = drawable_timing_enabled ? OS::get_singleton()->get_ticks_usec() : 0;
 			CA::MetalDrawable *drawable = layer->nextDrawable();
+			if (drawable_timing_enabled) {
+				uint64_t drawable_end_usec = OS::get_singleton()->get_ticks_usec();
+				uint64_t drawable_wait_usec = drawable_end_usec >= drawable_begin_usec ? drawable_end_usec - drawable_begin_usec : 0;
+				drawable_acquire_count++;
+				drawable_total_wait_usec += drawable_wait_usec;
+				drawable_max_wait_usec = MAX(drawable_max_wait_usec, drawable_wait_usec);
+				if (drawable_wait_usec >= drawable_warn_usec) {
+					drawable_stall_count++;
+					fprintf(stderr,
+							"Godot Metal off-screen nextDrawable stall: wait=%lluus, acquisition=%llu, present_interval=%lluus, size=%ux%u\n",
+							(unsigned long long)drawable_wait_usec, (unsigned long long)drawable_acquire_count,
+							(unsigned long long)present_interval_usec, width, height);
+				}
+			}
 			ERR_FAIL_NULL_V_MSG(drawable, RDD::FramebufferID(), "no drawable available");
 			drawables[rear] = drawable;
 			frame_buffer.set_texture(0, drawable->texture());
