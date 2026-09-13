@@ -248,6 +248,7 @@ class API_AVAILABLE(macos(11.0), ios(14.0), tvos(14.0)) SurfaceOffscreen : publi
 	int32_t rear = -1;
 	std::atomic_int count;
 	uint64_t target_time = 0;
+	uint64_t present_interval_usec = 1'000'000;
 	CA::MetalLayer *layer;
 
 public:
@@ -261,6 +262,13 @@ public:
 #if TARGET_OS_OSX
 		layer->setDisplaySyncEnabled(false);
 #endif
+		if (String present_hz_env = OS::get_singleton()->get_environment("GODOT_MTL_OFF_SCREEN_PRESENT_HZ"); !present_hz_env.is_empty()) {
+			int64_t present_hz = present_hz_env.to_int();
+			if (present_hz > 0) {
+				uint64_t interval_usec = 1'000'000 / uint64_t(present_hz);
+				present_interval_usec = interval_usec > 0 ? interval_usec : 1;
+			}
+		}
 		target_time = OS::get_singleton()->get_ticks_usec();
 
 		textures.resize(frame_buffer_size);
@@ -345,7 +353,7 @@ public:
 		frame_buffer.size = Size2i(width, height);
 		uint64_t now = OS::get_singleton()->get_ticks_usec();
 		if (now >= target_time) {
-			target_time = now + 1'000'000; // 1 second into the future.
+			target_time = now + present_interval_usec;
 			CA::MetalDrawable *drawable = layer->nextDrawable();
 			ERR_FAIL_NULL_V_MSG(drawable, RDD::FramebufferID(), "no drawable available");
 			drawables[rear] = drawable;
